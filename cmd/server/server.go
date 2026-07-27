@@ -152,17 +152,22 @@ func runAPI(d driver.Registry, n *negroni.Negroni, logger *logrusx.Logger, prom 
 	}
 }
 
+// prometheusHandler serves prom's registry, additionally offering the
+// OpenMetrics exposition format when the scraper negotiates it. OpenMetrics
+// is the only format that carries exemplars.
+func prometheusHandler(prom *metrics.PrometheusRepository) http.Handler {
+	return promhttp.HandlerFor(prom.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true})
+}
+
 func runPrometheus(d driver.Registry, logger *logrusx.Logger, prom *metrics.PrometheusRepository) func() {
 	return func() {
-		promPath := d.Config().PrometheusMetricsPath()
 		promAddr := d.Config().PrometheusServeAddress()
 
 		server := graceful.WithDefaults(&http.Server{ //nolint:gosec // server intentionally configured by graceful defaults
 			Addr:    promAddr,
-			Handler: promhttp.HandlerFor(prom.Registry, promhttp.HandlerOpts{}),
+			Handler: prometheusHandler(prom),
 		})
 
-		http.Handle(promPath, promhttp.Handler())
 		// Expose the registered metrics via HTTP.
 		if err := graceful.Graceful(func() error {
 			logger.Infof("Listening on http://%s", promAddr)

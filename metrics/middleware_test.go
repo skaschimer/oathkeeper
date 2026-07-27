@@ -12,7 +12,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/require"
 	"github.com/urfave/negroni"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/ory/oathkeeper/internal"
 	"github.com/ory/oathkeeper/x"
@@ -199,4 +202,40 @@ func TestMiddlewareGetFirstPathSegment(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Requests running under a sampled trace span must attach trace exemplars to
+// the request duration histogram and the request counter.
+func TestMiddlewareAttachesExemplars(t *testing.T) {
+	RequestTotal.Reset()
+	HistogramRequestDuration.Reset()
+
+	promRepo := NewTestPrometheusRepository(RequestTotal)
+	promMiddleware := NewMiddleware(promRepo, "test")
+
+	ctx, span := sdktrace.NewTracerProvider().Tracer(t.Name()).Start(t.Context(), "req")
+	defer span.End()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	promMiddleware.ServeHTTP(negroni.NewResponseWriter(rec), req, func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+	})
+
+	ch := make(chan prometheus.Metric, 100)
+	HistogramRequestDuration.Collect(ch)
+	close(ch)
+	found := false
+	for m := range ch {
+		pb := new(dto.Metric)
+		require.NoError(t, m.Write(pb))
+		for _, b := range pb.GetHistogram().GetBucket() {
+			for _, l := range b.GetExemplar().GetLabel() {
+				if l.GetName() == "trace_id" && l.GetValue() == span.SpanContext().TraceID().String() {
+					found = true
+				}
+			}
+		}
+	}
+	require.True(t, found, "expected a bucket exemplar with the request's trace ID on the duration histogram")
 }
